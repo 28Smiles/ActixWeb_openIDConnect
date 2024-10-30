@@ -292,7 +292,7 @@ impl FromRequest for Authenticated {
     type Future = Ready<Result<Self, Self::Error>>;
 
     fn from_request(
-        req: &actix_web::HttpRequest,
+        req: &HttpRequest,
         _payload: &mut actix_web::dev::Payload,
     ) -> Self::Future {
         let value = req.extensions().get::<Result<AuthenticatedUser, AuthError>>().cloned();
@@ -307,6 +307,33 @@ impl FromRequest for Authenticated {
 
 impl std::ops::Deref for Authenticated {
     type Target = AuthenticatedUser;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+pub struct MaybeAuthenticated(Option<AuthenticatedUser>);
+
+impl FromRequest for Authenticated {
+    type Error = Error;
+    type Future = Ready<Result<Self, Self::Error>>;
+
+    fn from_request(
+        req: &HttpRequest,
+        _payload: &mut actix_web::dev::Payload,
+    ) -> Self::Future {
+        let value = req.extensions().get::<Result<AuthenticatedUser, AuthError>>().cloned();
+        let result = match value {
+            Some(Ok(v)) => MaybeAuthenticated(Some(v)),
+            _ => MaybeAuthenticated(None),
+        };
+        ready(Ok(result))
+    }
+}
+
+impl std::ops::Deref for MaybeAuthenticated {
+    type Target = Option<AuthenticatedUser>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
