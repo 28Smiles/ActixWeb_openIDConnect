@@ -1,7 +1,6 @@
-use actix_http::body::MessageBody;
 use actix_http::header::HeaderMap;
 use actix_web::dev::ServiceResponse;
-use actix_web::web::{Buf, Bytes};
+use actix_web::web::Bytes;
 use actix_web::Error;
 use actix_web_openidconnect::ActixWebOpenId;
 use httpmock::Method::GET;

@@ -56,7 +56,7 @@ pub struct AuthenticatedUser {
     pub access: UserInfoClaims<EmptyAdditionalClaims, CoreGenderClaim>,
 }
 
-#[derive(Debug, derive_more::Error)]
+#[derive(Clone, Debug, derive_more::Error)]
 enum AuthError {
     NotAuthenticated { issuer_url: String, nonce: String },
 }
@@ -130,24 +130,21 @@ where
         };
 
         Box::pin(async move {
-            if path2.starts_with("/auth_callback") || !should_auth(&req) {
+            if path2.starts_with("/auth_callback") {
                 return srv.call(req).await;
             }
             match req.cookie(AuthCookies::AccessToken.to_string().as_str()) {
-                None => return Err(redirect_to_auth().into()),
+                None => if should_auth(&req) {
+                    // Auth is not optional
+                    return Err(redirect_to_auth().into())
+                },
                 Some(token) => {
-                    let user_info = match client
+                    let auth_user = client
                         .user_info(AccessToken::new(token.value().to_string()))
                         .await
-                    {
-                        Ok(user_info) => user_info,
-                        Err(_) => {
-                            log::debug!("Token not active, redirecting to auth");
-                            return Err(redirect_to_auth().into());
-                        }
-                    };
-                    req.extensions_mut()
-                        .insert(AuthenticatedUser { access: user_info });
+                        .map_err(|_| redirect_to_auth())
+                        .map(|user_info| AuthenticatedUser { access: user_info });
+                    req.extensions_mut().insert(auth_user);
                 }
             }
             srv.call(req).await
@@ -298,9 +295,10 @@ impl FromRequest for Authenticated {
         req: &actix_web::HttpRequest,
         _payload: &mut actix_web::dev::Payload,
     ) -> Self::Future {
-        let value = req.extensions().get::<AuthenticatedUser>().cloned();
+        let value = req.extensions().get::<Result<AuthenticatedUser, AuthError>>().cloned();
         let result = match value {
-            Some(v) => Ok(Authenticated(v)),
+            Some(Ok(v)) => Ok(Authenticated(v)),
+            Some(Err(e)) => Err(e.into()),
             None => Err(ErrorUnauthorized("Unauthorized")),
         };
         ready(result)
