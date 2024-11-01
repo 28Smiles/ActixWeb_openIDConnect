@@ -84,7 +84,7 @@ impl error::ResponseError for AuthError {
     fn error_response(&self) -> HttpResponse<BoxBody> {
         let mut resp = HttpResponse::build(self.status_code()).body(self.to_string());
         match self {
-            AuthError::NotAuthenticated { issuer_url, nonce, callback_path } => {
+            AuthError::NotAuthenticated { issuer_url, nonce } => {
                 resp.add_cookie(&Cookie::build(AuthCookies::Nonce.to_string(), nonce)
                     .path("/")
                     .finish()
