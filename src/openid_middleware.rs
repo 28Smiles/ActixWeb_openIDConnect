@@ -324,7 +324,7 @@ impl FromRequest for MaybeAuthenticated {
     ) -> Self::Future {
         let value = req.extensions().get::<Result<AuthenticatedUser, AuthError>>().cloned();
         ready(match value {
-            Some(Ok(v)) => Ok(MaybeAuthenticated(Ok(v))),
+            Some(v) => Ok(MaybeAuthenticated(v)),
             _ => Err(ErrorUnauthorized("Unauthorized")),
         })
     }
