@@ -144,6 +144,9 @@ where
                         .await
                         .map_err(|_| redirect_to_auth())
                         .map(|user_info| AuthenticatedUser { access: user_info });
+                    if auth_user.is_err() && should_auth(&req) {
+                        return Err(redirect_to_auth().into());
+                    }
                     req.extensions_mut().insert(auth_user);
                 }
             }
