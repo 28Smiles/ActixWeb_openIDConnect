@@ -119,7 +119,6 @@ where
         let client2 = self.openid_client.clone();
         let should_auth = self.should_auth;
         let path = req.path().to_string();
-        let path2 = req.path().to_string();
 
         let redirect_to_auth = move || -> AuthError {
             let url = client2.get_authorization_url(path.clone());
@@ -130,13 +129,12 @@ where
         };
 
         Box::pin(async move {
-            if path2.starts_with("/auth_callback") {
-                return srv.call(req).await;
-            }
-            match req.cookie(AuthCookies::AccessToken.to_string().as_str()) {
+            let auth_user = match req.cookie(AuthCookies::AccessToken.to_string().as_str()) {
                 None => if should_auth(&req) {
                     // Auth is not optional
                     return Err(redirect_to_auth().into())
+                } else {
+                    Err(redirect_to_auth())
                 },
                 Some(token) => {
                     let auth_user = client
@@ -147,9 +145,11 @@ where
                     if auth_user.is_err() && should_auth(&req) {
                         return Err(redirect_to_auth().into());
                     }
-                    req.extensions_mut().insert(auth_user);
+
+                    auth_user
                 }
-            }
+            };
+            req.extensions_mut().insert(auth_user);
             srv.call(req).await
         })
     }
