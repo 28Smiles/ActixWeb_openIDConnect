@@ -312,7 +312,7 @@ impl std::ops::Deref for Authenticated {
     }
 }
 
-pub struct MaybeAuthenticated(Option<AuthenticatedUser>);
+pub struct MaybeAuthenticated(Result<AuthenticatedUser, AuthError>);
 
 impl FromRequest for MaybeAuthenticated {
     type Error = Error;
@@ -323,17 +323,29 @@ impl FromRequest for MaybeAuthenticated {
         _payload: &mut actix_web::dev::Payload,
     ) -> Self::Future {
         let value = req.extensions().get::<Result<AuthenticatedUser, AuthError>>().cloned();
-        ready(Ok(match value {
-            Some(Ok(v)) => MaybeAuthenticated(Some(v)),
-            _ => MaybeAuthenticated(None),
-        }))
+        ready(match value {
+            Some(Ok(v)) => Ok(MaybeAuthenticated(Ok(v))),
+            _ => Err(ErrorUnauthorized("Unauthorized")),
+        })
     }
 }
 
-impl std::ops::Deref for MaybeAuthenticated {
-    type Target = Option<AuthenticatedUser>;
+impl<'a> Into<Option<&'a AuthenticatedUser>> for &'a MaybeAuthenticated {
+    fn into(self) -> Option<&'a AuthenticatedUser> {
+        match &self.0 {
+            Ok(v) => Some(v),
+            _ => None,
+        }
+    }
+}
 
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl<'a> TryInto<&'a AuthenticatedUser> for &'a MaybeAuthenticated {
+    type Error = Error;
+
+    fn try_into(self) -> Result<&'a AuthenticatedUser, Self::Error> {
+        match &self.0 {
+            Ok(v) => Ok(v),
+            Err(e) => Err(e.clone().into()),
+        }
     }
 }
