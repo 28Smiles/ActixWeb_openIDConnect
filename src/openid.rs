@@ -1,9 +1,6 @@
 use anyhow::Result;
 use oauth2::basic::{BasicErrorResponseType, BasicRevocationErrorResponse};
-use oauth2::{
-    EndpointMaybeSet, EndpointNotSet, EndpointSet, PkceCodeChallenge, PkceCodeVerifier,
-    StandardErrorResponse, StandardRevocableToken,
-};
+use oauth2::{EndpointMaybeSet, EndpointNotSet, EndpointSet, HttpRequest, HttpResponse, PkceCodeChallenge, PkceCodeVerifier, RequestTokenError, StandardErrorResponse, StandardRevocableToken};
 use openidconnect::core::{
     CoreAuthDisplay, CoreAuthPrompt, CoreAuthenticationFlow, CoreClaimName, CoreClaimType,
     CoreClient, CoreClientAuthMethod, CoreGenderClaim, CoreGrantType, CoreIdTokenClaims,
@@ -11,7 +8,7 @@ use openidconnect::core::{
     CoreJwsSigningAlgorithm, CoreResponseMode, CoreResponseType, CoreSubjectIdentifierType,
     CoreTokenIntrospectionResponse, CoreTokenResponse,
 };
-use openidconnect::{reqwest, Client, IdToken};
+use openidconnect::{Client, IdToken, UserInfoError};
 use openidconnect::{
     AccessToken, AdditionalProviderMetadata, AuthorizationCode, ClaimsVerificationError, ClientId,
     ClientSecret, CsrfToken, EmptyAdditionalClaims, EndSessionUrl, IssuerUrl, LogoutRequest, Nonce,
@@ -20,10 +17,11 @@ use openidconnect::{
 };
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
+use std::future::Future;
 use url::Url;
 
 #[derive(Clone)]
-pub struct OpenID {
+pub struct OpenID<C> {
     client: ExtendedClient,
     provider_metadata: ExtendedProviderMetadata,
     post_logout_redirect_url: Option<String>,
@@ -32,6 +30,7 @@ pub struct OpenID {
     pub(crate) redirect_on_error: bool,
     allow_all_audiences: bool,
     pub(crate) use_pkce: bool,
+    async_http_client: C,
 }
 
 pub struct OpenIDTokens {
@@ -95,11 +94,14 @@ pub(crate) type ExtendedIdToken = IdToken<
     CoreJwsSigningAlgorithm,
 >;
 
-fn get_http_client() -> reqwest::Client {
-    reqwest::Client::builder().build().unwrap()
-}
-
-impl OpenID {
+impl<C, F, E> OpenID<C>
+    where
+        C: Fn(HttpRequest) -> F + Send + Sync + 'static,
+        F: Future<Output =std::result::Result<HttpResponse, E>> + 'static,
+        E: std::error::Error + Send + Sync + 'static,
+        anyhow::Error: From<UserInfoError<E>>,
+        anyhow::Error: From<RequestTokenError<E, StandardErrorResponse<BasicErrorResponseType>>>,
+{
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn init(
         client_id: String,
@@ -112,22 +114,23 @@ impl OpenID {
         allow_all_audiences: bool,
         use_pkce: bool,
         redirect_on_error: bool,
+        async_http_client: C,
     ) -> Result<Self> {
         let provider_metadata = ExtendedProviderMetadata::discover_async(
             IssuerUrl::new(issuer_url)?,
-            &get_http_client(),
+            &async_http_client,
         )
-        .await
-        .expect("Failed to discover OpenID Provider");
+            .await
+            .expect("Failed to discover OpenID Provider");
 
         let client = CoreClient::from_provider_metadata(
             provider_metadata.clone(),
             ClientId::new(client_id.to_string()),
             client_secret.map(|client_secret| ClientSecret::new(client_secret.to_string())),
         )
-        .set_redirect_uri(
-            RedirectUrl::new(redirect_uri.to_string()).expect("Invalid redirect URL"),
-        );
+            .set_redirect_uri(
+                RedirectUrl::new(redirect_uri.to_string()).expect("Invalid redirect URL"),
+            );
 
         Ok(Self {
             client,
@@ -138,6 +141,7 @@ impl OpenID {
             use_pkce,
             redirect_on_error,
             allow_all_audiences,
+            async_http_client,
         })
     }
 
@@ -181,8 +185,7 @@ impl OpenID {
         } else {
             self.client.exchange_code(authorization_code)?
         }
-        .request_async(&get_http_client())
-        .await?;
+        .request_async(&self.async_http_client).await?;
 
         let id_token = token_response.id_token().cloned();
 
@@ -200,7 +203,7 @@ impl OpenID {
         Ok(self
             .client
             .user_info(access_token, None)?
-            .request_async(&get_http_client())
+            .request_async(&self.async_http_client)
             .await?)
     }
 

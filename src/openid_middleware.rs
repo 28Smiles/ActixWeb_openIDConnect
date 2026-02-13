@@ -1,6 +1,6 @@
 use std::fmt;
 use std::fmt::{Display, Formatter};
-use std::future::{ready, Ready};
+use std::future::{ready, Future, Ready};
 use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -15,8 +15,10 @@ use actix_web::http::header::LOCATION;
 use actix_web::http::StatusCode;
 use actix_web::{error, web, Error, FromRequest, HttpMessage, HttpRequest, HttpResponse};
 use futures_util::future::LocalBoxFuture;
+use oauth2::{RequestTokenError, StandardErrorResponse};
+use oauth2::basic::BasicErrorResponseType;
 use openidconnect::core::CoreGenderClaim;
-use openidconnect::{AccessToken, AuthorizationCode, EmptyAdditionalClaims, UserInfoClaims};
+use openidconnect::{AccessToken, AuthorizationCode, EmptyAdditionalClaims, UserInfoClaims, UserInfoError};
 use serde::Deserialize;
 
 use crate::openid::{ExtendedIdToken, OpenID};
@@ -112,19 +114,24 @@ impl error::ResponseError for AuthError {
     }
 }
 
-pub struct OpenIdMiddleware<S> {
-    openid_client: Arc<OpenID>,
+pub struct OpenIdMiddleware<C, S> {
+    openid_client: Arc<OpenID<C>>,
     service: Rc<S>,
     should_auth: fn(&ServiceRequest) -> bool,
     use_pkce: bool,
     redirect_path: String,
 }
 
-impl<S> OpenIdMiddleware<S> {}
+impl<C, S> OpenIdMiddleware<C, S> {}
 
-impl<S, B> Service<ServiceRequest> for OpenIdMiddleware<S>
+impl<C, F, E, S, B> Service<ServiceRequest> for OpenIdMiddleware<C, S>
 where
     S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
+    C: Fn(oauth2::HttpRequest) -> F + Send + Sync + 'static,
+    F: Future<Output = Result<oauth2::HttpResponse, E>> + 'static,
+    E: std::error::Error + Send + Sync + 'static,
+    anyhow::Error: From<UserInfoError<E>>,
+    anyhow::Error: From<RequestTokenError<E, StandardErrorResponse<BasicErrorResponseType>>>,
 {
     type Response = ServiceResponse<B>;
     type Error = Error;
@@ -177,16 +184,16 @@ where
     }
 }
 
-pub struct AuthenticateMiddlewareFactory {
-    client: Arc<OpenID>,
+pub struct AuthenticateMiddlewareFactory<C> {
+    client: Arc<OpenID<C>>,
     should_auth: fn(&ServiceRequest) -> bool,
     use_pkce: bool,
     redirect_path: String,
 }
 
-impl AuthenticateMiddlewareFactory {
+impl<C> AuthenticateMiddlewareFactory<C> {
     pub(crate) fn new(
-        client: Arc<OpenID>,
+        client: Arc<OpenID<C>>,
         should_auth: fn(&ServiceRequest) -> bool,
         use_pkce: bool,
         redirect_path: String,
@@ -200,13 +207,18 @@ impl AuthenticateMiddlewareFactory {
     }
 }
 
-impl<S, B> Transform<S, ServiceRequest> for AuthenticateMiddlewareFactory
+impl<C, F, E, S, B> Transform<S, ServiceRequest> for AuthenticateMiddlewareFactory<C>
 where
     S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
+    C: Fn(oauth2::HttpRequest) -> F + Send + Sync + 'static,
+    F: Future<Output = Result<oauth2::HttpResponse, E>> + 'static,
+    E: std::error::Error + Send + Sync + 'static,
+    anyhow::Error: From<UserInfoError<E>>,
+    anyhow::Error: From<RequestTokenError<E, StandardErrorResponse<BasicErrorResponseType>>>,
 {
     type Response = ServiceResponse<B>;
     type Error = Error;
-    type Transform = OpenIdMiddleware<S>;
+    type Transform = OpenIdMiddleware<C, S>;
     type InitError = ();
     type Future = Ready<Result<Self::Transform, Self::InitError>>;
 
@@ -227,10 +239,15 @@ pub(crate) struct AuthQuery {
     state: String,
 }
 
-pub(crate) async fn logout_endpoint(
+pub(crate) async fn logout_endpoint<C, F, E>(
     req: HttpRequest,
-    open_id_client: web::Data<Arc<OpenID>>,
-) -> actix_web::Result<HttpResponse> {
+    open_id_client: web::Data<Arc<OpenID<C>>>,
+) -> actix_web::Result<HttpResponse>
+    where
+        C: Fn(oauth2::HttpRequest) -> F + Send + Sync + 'static,
+        F: Future<Output = Result<oauth2::HttpResponse, E>> + 'static,
+        E: std::error::Error + Send + Sync + 'static,
+{
     let id_token = match req.cookie(AuthCookies::IdToken.to_string().as_str()) {
         None => {
             log::debug!("No id token, redirecting to auth");
@@ -244,11 +261,16 @@ pub(crate) async fn logout_endpoint(
     Ok(response.finish())
 }
 
-async fn execute_auth_endpoint(
+async fn execute_auth_endpoint<C, F, E>(
     req: &HttpRequest,
-    open_id_client: &Arc<OpenID>,
+    open_id_client: &Arc<OpenID<C>>,
     query: &AuthQuery,
-) -> actix_web::Result<HttpResponse> {
+) -> actix_web::Result<HttpResponse>
+    where
+        C: Fn(oauth2::HttpRequest) -> F + Send + Sync + 'static,
+        F: Future<Output = Result<oauth2::HttpResponse, E>> + 'static,
+        E: std::error::Error + Send + Sync + 'static,
+{
     let nonce = req
         .cookie(AuthCookies::Nonce.to_string().as_str())
         .ok_or_else(|| {
@@ -344,11 +366,16 @@ async fn execute_auth_endpoint(
     })
 }
 
-pub(crate) async fn auth_endpoint(
+pub(crate) async fn auth_endpoint<C, F, E>(
     req: HttpRequest,
-    open_id_client: web::Data<Arc<OpenID>>,
+    open_id_client: web::Data<Arc<OpenID<C>>>,
     query: web::Query<AuthQuery>,
-) -> actix_web::Result<HttpResponse> {
+) -> actix_web::Result<HttpResponse>
+    where
+        C: Fn(oauth2::HttpRequest) -> F + Send + Sync + 'static,
+        F: Future<Output = Result<oauth2::HttpResponse, E>> + 'static,
+        E: std::error::Error + Send + Sync + 'static,
+{
     let res = execute_auth_endpoint(&req, &open_id_client, &query).await;
     if res.is_err() && open_id_client.redirect_on_error {
         let url = open_id_client.get_authorization_url("/".to_string(), open_id_client.use_pkce);
